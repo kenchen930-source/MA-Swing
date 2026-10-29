@@ -10,9 +10,33 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(page_title='波段均線選股器', layout='wide')
-st.title('波段均線選股器 V1.0')
+st.title('波段均線選股器 V1.1')
 st.caption('獨立於 60KD｜上市＋上櫃｜日線收盤資料｜免費 Yahoo 行情，僅供候選股研究')
 TZ = ZoneInfo('Asia/Taipei')
+
+# TWSE/TPEx official industry classification (code or Chinese industry label).
+INDUSTRY_CODES = {
+    '01':'水泥工業', '02':'食品工業', '03':'塑膠工業', '04':'紡織纖維',
+    '05':'電機機械', '06':'電器電纜', '08':'玻璃陶瓷', '09':'造紙工業',
+    '10':'鋼鐵工業', '11':'橡膠工業', '12':'汽車工業', '14':'建材營造',
+    '15':'航運業', '16':'觀光餐旅', '17':'金融保險', '18':'貿易百貨',
+    '20':'其他業', '21':'化學工業', '22':'生技醫療', '23':'油電燃氣',
+    '24':'半導體', '25':'電腦及週邊設備', '26':'光電', '27':'通信網路',
+    '28':'電子零組件', '29':'電子通路', '30':'資訊服務', '31':'其他電子',
+    '32':'文化創意', '33':'農業科技', '34':'電子商務', '35':'綠能環保',
+    '36':'數位雲端', '37':'運動休閒', '38':'居家生活', '39':'其他',
+}
+
+def industry_of(entry):
+    keys = ('產業別', '產業別名稱', '產業名稱', '產業類別',
+            'Industry', 'IndustryCode', 'IndustryName', 'SecuritiesIndustryCode')
+    raw = next((str(entry[k]).strip() for k in keys if entry.get(k) is not None and str(entry[k]).strip()), '')
+    if not raw:
+        return '未分類'
+    if raw.isdigit():
+        return INDUSTRY_CODES.get(raw.zfill(2), f'其他分類（{raw}）')
+    raw = raw.replace('產業', '').replace('工業', '工業') if raw.endswith('產業') else raw
+    return raw
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def stock_universe():
@@ -31,7 +55,7 @@ def stock_universe():
                 code = str(next((entry[k] for k in ('公司代號', 'SecuritiesCompanyCode', 'CompanyCode', 'Code') if entry.get(k)), '')).strip()
                 name = str(next((entry[k] for k in ('公司簡稱', '公司名稱', 'CompanyName', 'SecuritiesCompanyName', 'Name') if entry.get(k)), code)).strip()
                 if re.fullmatch(r'\d{4}', code):
-                    items.append({'代號':code, '名稱':name, '市場':market, 'ticker':code+suffix})
+                    items.append({'代號':code, '名稱':name, '市場':market, '產業':industry_of(entry), 'ticker':code+suffix})
                     count += 1
             if count < 100:
                 raise ValueError(f'僅辨識 {count} 檔')
@@ -161,7 +185,7 @@ if st.button('開始掃描', type='primary'):
                     raise ValueError('日線資料不足或下載失敗' + (f'：{error}' if error else ''))
                 matched = evaluate(df, concentration_limit, deviation_limit, flat_tolerance)
                 if matched is not None:
-                    results.append({'代號':stock['代號'], '名稱':stock['名稱'], '市場':stock['市場'], **matched})
+                    results.append({'代號':stock['代號'], '名稱':stock['名稱'], '市場':stock['市場'], '產業':stock['產業'], **matched})
             except Exception as e:
                 failures.append({'股票':stock['ticker'], '原因':str(e)[:140]})
         done = min(start + len(batch), len(selected))
@@ -173,14 +197,26 @@ if st.button('開始掃描', type='primary'):
     st.success(f'掃描完成｜成功 {success:,}/{len(selected):,}（{success/len(selected):.1%}）｜失敗 {len(failures):,}')
     if failures or roster_errors:
         st.warning('資料未完整覆蓋；失敗股票不能視為不符合條件。')
-    st.subheader(f'剛形成多頭完美排列：{len(results)} 檔')
-    if results:
-        out = pd.DataFrame(results).sort_values(['排列第幾天','20MA乖離%'], ascending=[True, True]).reset_index(drop=True)
-        st.dataframe(out, hide_index=True, use_container_width=True)
-        st.download_button('下載 CSV', out.to_csv(index=False).encode('utf-8-sig'), 'ma_swing_results.csv', mime='text/csv')
-    else:
-        st.info('本次成功取得行情的股票中，沒有符合所有條件的股票。可考慮放寬 2% 糾結或 3% 乖離門檻。')
+    st.session_state['ma_swing_last_results'] = results
+    st.session_state['ma_swing_last_failures'] = failures
     if failures:
         with st.expander(f'查看失敗股票（{len(failures)} 檔）'):
             st.dataframe(pd.DataFrame(failures), hide_index=True)
+
+# Results are persisted across widget reruns, so changing industry does NOT trigger another scan.
+if 'ma_swing_last_results' in st.session_state:
+    saved = st.session_state['ma_swing_last_results']
+    st.subheader(f'剛形成多頭完美排列：{len(saved)} 檔')
+    if saved:
+        out = pd.DataFrame(saved).sort_values(['排列第幾天','20MA乖離%'], ascending=[True, True]).reset_index(drop=True)
+        sectors = sorted(out['產業'].fillna('未分類').unique().tolist())
+        selected_sectors = st.multiselect('依產業查看結果（可複選）', sectors, default=sectors,
+                                          help='不會重新掃描。若要看全部，選取所有產業。')
+        shown = out[out['產業'].isin(selected_sectors)].copy()
+        st.caption(f'目前顯示 {len(shown)} / {len(out)} 檔；產業依證交所／櫃買中心公司基本資料分類。')
+        st.dataframe(shown, hide_index=True, use_container_width=True)
+        st.download_button('下載目前顯示結果 CSV', shown.to_csv(index=False).encode('utf-8-sig'),
+                           'ma_swing_results_v1_1.csv', mime='text/csv')
+    else:
+        st.info('本次成功取得行情的股票中，沒有符合所有條件的股票。可考慮放寬 2% 糾結或 3% 乖離門檻。')
 st.info('本工具僅作為波段候選股雷達，請用券商日線確認均線與成交量、MACD，再自行評估風險。')
